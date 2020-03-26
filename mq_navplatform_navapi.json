@@ -1,0 +1,307 @@
+{
+   "AWSTemplateFormatVersion":"2010-09-09",
+   "Description":"NavPlatform NavApi",
+   "Parameters":{
+	   "Worker":{
+		   "Description":"Path to the routelet DB",
+		   "Type":"String"
+       },
+      "NavApiInstanceType":{
+         "Description":"EC2 instance type",
+         "Type":"String",
+         "Default":"m4.large",
+         "AllowedValues":[  "t2.micro", "t2.small", "t2.medium", "m3.medium", "m3.large", "m3.xlarge",
+            "m3.2xlarge", "m4.large", "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge", "c4.large",
+            "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge", "c3.large", "c3.xlarge", "c3.2xlarge",
+            "c3.4xlarge", "c3.8xlarge", "r3.large", "r3.xlarge", "r3.2xlarge", "r3.4xlarge", "r3.8xlarge",
+            "i2.xlarge", "i2.2xlarge", "i2.4xlarge", "i2.8xlarge", "hs1.8xlarge", "g2.2xlarge"
+         ],
+         "ConstraintDescription":"Must be a valid, HVM-compatible EC2 instance type."
+      },
+      "ArtifactVersion":{
+         "Description":"Artifact Version to install from S3",
+         "Type":"String"
+      },
+      "FQDN":{
+         "Description":"FQDN for application port 80",
+         "Type":"String"
+      },
+      "KeyName":{
+         "Description":"Name of an existing EC2 KeyPair to enable SSH access to the instance",
+         "Type":"AWS::EC2::KeyPair::KeyName",
+         "ConstraintDescription":"must be the name of an exising EC2 KeyPair",
+         "Default":"mxxxx"
+      },
+      "NavApiASGMinSize":{
+         "Description":" Autoscale Minimum Group Size",
+         "Default":1,
+         "Type":"Number"
+      },
+      "NavApiASGMaxSize":{
+         "Description":" Autoscale Maximum Group Size",
+         "Default":1,
+         "Type":"Number"
+      },
+      "AMIID":{
+         "Description":"AMI ID",
+         "Type":"String",
+         "Default":"ami-d341xxxx"
+      },
+      "NavApiORBProject":{
+         "Description":"ORB Project Element ID",
+         "Type":"Number",
+         "Default":"64xxxxxx"
+      },
+      "Environment":{
+         "Description":"Stack environment name",
+         "Default":"dev",
+         "AllowedValues":[
+            "prod",
+            "beta",
+            "int",
+            "dev"
+         ],
+         "Type":"String"
+      }
+   },
+   "Mappings":{
+      "VPC":{
+         "us-east-1":{  "VpcID":"vpc-fxxxxxxx" },
+         "us-west-2":{  "VpcID":"vpc-4xxxxxxx" }
+      },
+      "Region2Subnet":{
+         "us-east-1":{  "private":[  "subnet-xxxxxxxx", "subnet-xxxxxxxx", "subnet-xxxxxxxx" ], "public":  [ "subnet-xxxxxxxx", "subnet-xxxxxxxx", "subnet-xxxxxxxx" ] },
+         "us-west-2":{  "private":[  "subnet-xxxxxxxx", "subnet-xxxxxxxx", "subnet-xxxxxxxx" ] }
+      },
+      "Region2SG":{
+         "us-east-1":{  "public":  "sg-xxxxxxxx", "private":  "sg-xxxxxxxx" },
+         "us-west-2":{  "public":  "sg-xxxxxxxx", "private":  "sg-xxxxxxxx" },
+         "eu-west-1":{  "public":  "sg-xxxxxxxx", "private":  "sg-xxxxxxxx" }
+      }
+   },
+   "Conditions":{
+      "CreateProdConCluster":{"Fn::Equals": [{"Ref":"Environment"}, "prod"]}
+   },
+   "Resources":{
+      "NavApiLaunchConfig":{
+         "Type":"AWS::AutoScaling::LaunchConfiguration",
+         "Metadata":{
+            "AWS::CloudFormation::Init":{  "config":{  } }
+         },
+         "Properties":{
+            "BlockDeviceMappings":[
+               {
+                  "DeviceName":"/dev/sda1",
+                  "Ebs":{  "VolumeSize":"50", "VolumeType":"gp2" }
+               }
+            ],
+            "IamInstanceProfile":"nav_platform",
+            "ImageId":{  "Ref":"AMIID" },
+            "InstanceType":{  "Ref":"NavApiInstanceType" },
+            "KeyName":{  "Ref":"KeyName" },
+            "SecurityGroups":[
+               {  "Fn::FindInMap":[  "Region2SG", {  "Ref":"AWS::Region" }, "private" ] }
+            ],
+            "UserData":{  "Fn::Base64":{  "Fn::Join":[  "",
+             [
+                "#!/bin/bash -v\n",
+                "service ntpd stop\n",
+                "ntpdate xxx.xxx.xxx.xxx\n",
+                "service ntpd start\n",
+
+
+                "echo 'creating tmpdir'\n",
+                "mkdir /tmp/packer-chef-client\n",
+                "chmod 777 /tmp/packer-chef-client\n",
+                "echo done\n",
+                "cat << EOF > /tmp/s3.conf\n",
+                "[default]\n",
+                "access_key =\n",
+                "secret_key =\n",
+                "security_token =\n",
+                "EOF\n",
+                "sed -i 's/ENVIRONMENT/", {  "Ref":"Environment" },"/' /etc/logstash/conf.d/10-input_logstash.conf \n",
+                "killall -9 /opt/CrowdStrike/falcon-sensor\n",
+                "/opt/CrowdStrike/CsConfig -g --aid\n",
+                "/data/servers/mq_navplatform_navapi/load_artifact.sh ",
+                  { "Ref":"ArtifactVersion"}, " ",
+                  { "Ref":"Environment" }, "\n",
+                  "echo 'export ROUTE_WORKER_HOST=",
+                    { "Ref":"Worker"},
+                  "' >> /data/servers/mq_navplatform_navapi/config \n",
+		              "systemctl restart navapi.service \n",
+                "/usr/bin/cfn-signal -e $? ",
+                "         --stack ", {  "Ref":"AWS::StackName" },
+                "         --resource NavApiASG ",
+                "         --region ", {  "Ref":"AWS::Region" },
+                "\n",
+
+			"# Fix Datadog Hostname\n",
+          		"HOSTNAME=`hostname -s`\n",
+          		"sed -i 's/^\(hostname:\).*/\1 $HOSTNAME/' /etc/dd-agent/datadog.conf \n",
+
+          		"# Setup Consul for the right cluster \n",
+          		"/usr/local/bin/consul.discovery.sh\n",
+          		"systemctl enable consul\n",
+          		"systemctl restart consul\n",
+
+          		"# Bounce the DD agent to let it pick up any integrations & hostname change.\n",
+          		"systemctl restart datadog-agent\n"
+             ] ] } }
+         }
+      },
+      "NavApiELB":{
+         "Properties":{
+            "CrossZone":"true",
+            "HealthCheck":{
+               "HealthyThreshold":"2",
+               "Interval":"15",
+               "Target":"TCP:8080",
+               "Timeout":"5",
+               "UnhealthyThreshold":"5"
+            },
+            "Listeners":[
+               {  "InstancePort":"8080", "LoadBalancerPort":"80", "Protocol":"TCP" },
+               {  "InstancePort":"8080", "LoadBalancerPort":"443", "InstanceProtocol":"HTTP", "Protocol":"HTTPS", "SSLCertificateId":"arn:aws:iam::75xxxxxxxxxx:server-certificate/starxx.cloudxx.mapquest.com" }
+            ],
+            "Scheme":"internet-facing",
+            "SecurityGroups": [
+                { "Fn::FindInMap": [ "Region2SG", { "Ref": "AWS::Region" }, "public" ] }
+            ],
+            "Subnets": {  "Fn::FindInMap":[  "Region2Subnet", {  "Ref":"AWS::Region" }, "public" ] }
+         },
+         "Type":"AWS::ElasticLoadBalancing::LoadBalancer"
+      },
+      "NavApiASG":{
+         "Type":"AWS::AutoScaling::AutoScalingGroup",
+         "Properties":{
+            "HealthCheckGracePeriod":"120",
+            "HealthCheckType":"ELB",
+            "LaunchConfigurationName":{  "Ref":"NavApiLaunchConfig" },
+            "LoadBalancerNames":[  {  "Ref":"NavApiELB" } ],
+            "MinSize":{  "Ref":"NavApiASGMinSize" },
+            "MaxSize":{  "Ref":"NavApiASGMaxSize" },
+            "Tags":[
+               {
+                  "Key":"orbProjectId",
+                  "Value":{  "Ref":"NavApixxxxxxxxxxx" },
+                  "PropagateAtLaunch":"true"
+               },
+               {
+                  "Key":"Name",
+                  "Value":{  "Fn::Join":[ "", [
+                           "mq_navplatform_navapi_",
+                           {  "Ref":"Environment" },
+                           "_artifact_",
+                           {"Ref":"ArtifactVersion"} ] ] },
+                  "PropagateAtLaunch":"true"
+               },
+               {
+                  "Key":"mq_app",
+                  "Value":{  "Fn::Join":[ "", [
+                           "mq_navplatform_navapi_",
+                           {  "Ref":"Environment" },
+                           "_artifact_",
+                           {"Ref":"ArtifactVersion"} ] ] },
+                  "PropagateAtLaunch":"true"
+               },
+               {
+                 "Key":"mq_squad",
+                 "Value":"nav",
+                 "PropagateAtLaunch":"true"
+               },
+               {
+                 "Key":"mq_consul_cluster",
+                 "Value": {"Fn::If": [CreateProdConCluster, "prod", "nonprod"]}
+                 "PropagateAtLaunch":"true"
+               }
+            ],
+            "VPCZoneIdentifier":{  "Fn::FindInMap":[  "Region2Subnet", {  "Ref":"AWS::Region" }, "private" ] }
+         },
+         "UpdatePolicy":{
+            "AutoScalingScheduledAction":{
+               "IgnoreUnmodifiedGroupSizeProperties":"true"
+            },
+            "AutoScalingRollingUpdate":{
+               "MinInstancesInService":"1",
+               "MaxBatchSize":"2",
+               "PauseTime":"PT15M",
+               "WaitOnResourceSignals":"true"
+            }
+         }
+      },
+      "NavApiScaleUpPolicy":{
+         "Type":"AWS::AutoScaling::ScalingPolicy",
+         "Properties":{
+            "AdjustmentType":"PercentChangeInCapacity",
+            "AutoScalingGroupName":{  "Ref":"NavApiASG" },
+            "Cooldown":"60",
+            "ScalingAdjustment":"100"
+         }
+      },
+      "NavApiScaleDownPolicy":{
+         "Type":"AWS::AutoScaling::ScalingPolicy",
+         "Properties":{
+            "AdjustmentType":"PercentChangeInCapacity",
+            "AutoScalingGroupName":{  "Ref":"NavApiASG" },
+            "Cooldown":"60",
+            "ScalingAdjustment":"-25"
+         }
+      },
+      "NavApiCPUAlarmHigh":{
+         "Type":"AWS::CloudWatch::Alarm",
+         "Properties":{
+            "AlarmDescription":"Scale-up if CPU > 60% for 4 minutes",
+            "MetricName":"CPUUtilization",
+            "Namespace":"AWS/EC2",
+            "Statistic":"Average",
+            "Period":"120",
+            "EvaluationPeriods":"2",
+            "Threshold":"60",
+            "AlarmActions":[  {  "Ref":"NavApiScaleUpPolicy" } ],
+            "Dimensions":[
+               {
+                  "Name":"AutoScalingGroupName",
+                  "Value":{  "Ref":"NavApiASG" }
+               }
+            ],
+            "ComparisonOperator":"GreaterThanThreshold"
+         }
+      },
+      "NavApiCPUAlarmLow":{
+         "Type":"AWS::CloudWatch::Alarm",
+         "Properties":{
+            "AlarmDescription":"Scale-down if CPU < 30% for 10 minutes",
+            "MetricName":"CPUUtilization",
+            "Namespace":"AWS/EC2",
+            "Statistic":"Average",
+            "Period":"300",
+            "EvaluationPeriods":"2",
+            "Threshold":"30",
+            "AlarmActions":[  {  "Ref":"NavApiScaleDownPolicy" } ],
+            "Dimensions":[
+               {
+                  "Name":"AutoScalingGroupName",
+                  "Value":{  "Ref":"NavApiASG" }
+               }
+            ],
+            "ComparisonOperator":"LessThanThreshold"
+         }
+      },
+      "NavApiRecordSet":{
+         "Properties":{
+            "AliasTarget":{
+               "DNSName":{  "Fn::GetAtt":[  "NavApiELB", "DNSName" ] },
+               "EvaluateTargetHealth":"true",
+               "HostedZoneId":{  "Fn::GetAtt":[  "NavApiELB", "CanonicalHostedZoneNameID" ] }
+            },
+            "HostedZoneId":"xxxxxxxxxxxx",
+            "Name":{  "Ref":"FQDN" },
+            "Region":{  "Ref":"AWS::Region" },
+            "SetIdentifier":{  "Fn::Join":[  "", [  {  "Ref":"AWS::StackName" }, {  "Ref":"AWS::Region" } ] ] },
+            "Type":"A"
+         },
+         "Type":"AWS::Route53::RecordSet"
+      }
+   }
+}
